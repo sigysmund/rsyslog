@@ -159,8 +159,12 @@ typedef struct targetData {
 	tcpclt_t *pTCPClt;	/* our tcpclt object */
 	sbool bzInitDone; /* did we do an init of zstrm already? */
 	z_stream zstrm;	/* zip stream to use for tcp compression */
-	uchar sndBuf[16*1024];	/* this is intensionally fixed -- see no good reason to make configurable */
-	unsigned offsSndBuf;	/* next free spot in send buffer */
+	/* sndBuf buffer size is intensionally fixed -- see no good reason to make configurable */
+	#define SNDBUF_FIXED_BUFFER_SIZE (16*1024)
+	uchar sndBuf[SNDBUF_FIXED_BUFFER_SIZE];
+	/* we know int is sufficient, as we have the fixed buffer size above! so no need for size_t */
+	int maxLenSndBuf;	/* max usable length of sendbuf - primarily for testing */
+	int offsSndBuf;	/* next free spot in send buffer */
 	time_t ttResume;
 	targetStats_t *pTargetStats;
 } targetData_t;
@@ -195,7 +199,8 @@ static configSettings_t cs;
 /* tables for interfacing with the v6 config system */
 /* module-global parameters */
 static struct cnfparamdescr modpdescr[] = {
-	{ "template", eCmdHdlrGetWord, 0 },
+	{ "iobuffer.maxsize", eCmdHdlrNonNegInt, 0 },
+	{ "template", eCmdHdlrGetWord, 0 }
 };
 static struct cnfparamblk modpblk =
 	{ CNFPARAMBLK_VERSION,
@@ -254,6 +259,7 @@ static struct cnfparamblk actpblk =
 struct modConfData_s {
 	rsconf_t *pConf;	/* our overall config object */
 	uchar 	*tplName;	/* default template */
+	int maxLenSndBuf;	/* default max usable length of sendbuf - primarily for testing */
 };
 
 static modConfData_t *loadModConf = NULL;/* modConf ptr to use for the current load process */
@@ -379,6 +385,7 @@ CODESTARTbeginCnfLoad
 	loadModConf = pModConf;
 	pModConf->pConf = pConf;
 	pModConf->tplName = NULL;
+	pModConf->maxLenSndBuf = -1;
 ENDbeginCnfLoad
 
 BEGINsetModCnf
@@ -404,9 +411,22 @@ CODESTARTsetModCnf
 						"was already set via legacy directive - may lead to inconsistent "
 						"results.");
 			}
+		} else if(!strcmp(modpblk.descr[i].name, "iobuffer.maxsize")) {
+			const int newLen = (int) pvals[i].val.d.n;
+			if(newLen > SNDBUF_FIXED_BUFFER_SIZE) {
+				LogMsg(0, RS_RET_PARAM_ERROR, LOG_WARNING,
+					"omfwd: module parameter \"iobuffer.maxsize\" specified larger "
+					"than actual buffer size (%d bytes) - ignored",
+					SNDBUF_FIXED_BUFFER_SIZE);
+			} else {
+				if(newLen > 0) {
+					loadModConf->maxLenSndBuf = newLen;
+				}
+			}
 		} else {
-			dbgprintf("omfwd: program error, non-handled "
-			  "param '%s' in beginCnfLoad\n", modpblk.descr[i].name);
+			LogMsg(0, RS_RET_INTERNAL_ERROR, LOG_ERR,
+				"omfwd: internal error, non-handled param '%s' in beginCnfLoad",
+				modpblk.descr[i].name);
 		}
 	}
 finalize_it:
@@ -472,6 +492,10 @@ CODESTARTcreateWrkrInstance
 		 * missing ports.
 		 */
 		pWrkrData->target[i].port = pData->ports[(i < pData->nPorts) ? i : 0];
+		pWrkrData->target[i].maxLenSndBuf =
+			(runModConf->maxLenSndBuf == -1)
+				? SNDBUF_FIXED_BUFFER_SIZE
+				: runModConf->maxLenSndBuf;
 		pWrkrData->target[i].offsSndBuf = 0;
 		pWrkrData->target[i].ttResume = ttNow;
 	}
@@ -700,23 +724,28 @@ finalize_it:
 		if(iRet == RS_RET_IO_ERROR) {
 			static unsigned int conErrCnt = 0;
 			const int skipFactor = pWrkrData->pData->iConErrSkip;
+
+			const char *actualErrMsg;
+			if(iRet == RS_RET_PEER_CLOSED_CONN) {
+				actualErrMsg = "remote server closed connection";
+			} else {
+				actualErrMsg = "we had a generic or IO error with the remote server. "
+					"The actual error message should already have been provided. ";
+			}
 			if (skipFactor <= 1)  {
 				/* All the connection errors are printed. */
-				LogError(0, iRet, "omfwd: remote server at %s:%s seems to have closed connection. "
-					"This often happens when the remote peer (or an interim system like a load "
-					"balancer or firewall) shuts down or aborts a connection. Rsyslog will "
-					"re-open the connection if configured to do so (we saw a generic IO Error, "
-					"which usually goes along with that behaviour).",
-					pTarget->target_name, pTarget->port);
+				LogError(0, iRet, "omfwd: %s server is %s:%s. "
+					"This can be caused by the remote server or an interim system like a load "
+					"balancer or firewall. Rsyslog will re-open the connection if configured "
+					"to do so.", actualErrMsg, pTarget->target_name, pTarget->port);
 			} else if ((conErrCnt++ % skipFactor) == 0) {
 				/* Every N'th error message is printed where N is a skipFactor. */
-				LogError(0, iRet, "omfwd: remote server at %s:%s seems to have closed connection. "
-					"This often happens when the remote peer (or an interim system like a load "
-					"balancer or firewall) shuts down or aborts a connection. Rsyslog will "
-					"re-open the connection if configured to do so (we saw a generic IO Error, "
-					"which usually goes along with that behaviour). Note that the next %d "
-					"connection error messages will be skipped.",
-					pTarget->target_name, pTarget->port, skipFactor-1);
+				LogError(0, iRet, "omfwd: %s server is %s:%s. "
+					"This can be caused by the remote server or an interim system like a load "
+					"balancer or firewall. Rsyslog will re-open the connection if configured "
+					"to do so. Note that the next %d connection error messages will be "
+					"skipped.",
+					actualErrMsg, pTarget->target_name, pTarget->port, skipFactor - 1);
 			}
 		} else {
 			LogError(0, iRet, "omfwd: TCPSendBuf error %d, destruct TCP Connection to %s:%s",
@@ -838,9 +867,9 @@ TCPSendFrame(void *pvData, char *msg, const size_t len)
 	DEFiRet;
 	targetData_t *pTarget = (targetData_t *) pvData;
 
-	DBGPRINTF("omfwd: add %zu bytes to send buffer (curr offs %u) msg: %*s\n",
-		len, pTarget->offsSndBuf, (int) len, msg);
-	if(pTarget->offsSndBuf != 0 && pTarget->offsSndBuf + len >= sizeof(pTarget->sndBuf)) {
+	DBGPRINTF("omfwd: add %zu bytes to send buffer (curr offs %u, max len %d) msg: %*s\n",
+		len, pTarget->offsSndBuf, pTarget->maxLenSndBuf, (int) len, msg);
+	if(pTarget->offsSndBuf != 0 && (pTarget->offsSndBuf + len) >= (size_t) pTarget->maxLenSndBuf) {
 		/* no buffer space left, need to commit previous records. With the
 		 * current API, there unfortunately is no way to signal this
 		 * state transition to the upper layer.
@@ -866,24 +895,6 @@ TCPSendFrame(void *pvData, char *msg, const size_t len)
 finalize_it:
 	RETiRet;
 }
-
-#if 1 // TODO: remove?
-
-/* This function is called immediately before a send retry is attempted.
- * It shall clean up whatever makes sense.
- * rgerhards, 2007-12-28
- */
-static rsRetVal TCPSendPrepRetry(void *pvData)
-{
-	DEFiRet;
-	targetData_t *pTarget = (targetData_t *) pvData;
-	wrkrInstanceData_t *pWrkrData = pTarget->pWrkrData;
-
-	assert(pWrkrData != NULL);
-	DestructTCPInstanceData(pWrkrData);
-	RETiRet;
-}
-#endif
 
 
 /* initializes a TCP session to a single Target
@@ -958,53 +969,30 @@ dbgprintf("TCPSendInitTarget exit state %d, target %s:%s, pNetstrm %p, connected
 }
 
 
-// TODO: TCPSendInit looks obsolete or should be converted itself to dummy
-// clean this up when close to being done
-#if 0
-
-/* initializes everything so that TCPSend can work.
+/* Callback to initialize the provided target.
  * rgerhards, 2007-12-28
  */
 static rsRetVal
 TCPSendInit(void *pvData)
 {
-	DEFiRet;
-	targetData_t *const pTarget = (targetData_t *) pvData;
-	wrkrInstanceData_t *const pWrkrData = (wrkrInstanceData_t *) pTarget->pWrkrData;
-	instanceData *const pData = pWrkrData->pData;
-	int oneTargetOK = 0;
-
-	/* we do not err out, as we need to process all targets.
-	 * The targets themself handle errors.
-	 */
-	for(int i = 0 ; i <  pData->nTargets ; ++i) {
-		const targetData_t *const pLoopTarget = &(pWrkrData->target[i]);;
-		if(pLoopTarget->bIsConnected == 0) {
-DBGPRINTF("TCPSendInit: loop target %i %s:%s conn %d\n", i, pLoopTarget->target_name, pLoopTarget->port, pLoopTarget->bIsConnected);
-			iRet = TCPSendInitTarget(&(pWrkrData->target[i]));
-DBGPRINTF("TCPSendInit: loop after TCPSendInitTraget target %i %s:%s conn %d\n", i, pLoopTarget->target_name, pLoopTarget->port, pLoopTarget->bIsConnected);
-			if(iRet == RS_RET_OK)
-				oneTargetOK = 1;
-		}
-	}
-
-DBGPRINTF("TCPSendInit: oneTargetOK: %d\n", oneTargetOK);
-	if(oneTargetOK) {
-		iRet = RS_RET_OK; /* one is sufficient! */
-	}
-
-	RETiRet;
+	return TCPSendInitTarget((targetData_t *) pvData);
 }
-#endif
 
-/* TODO: check validity of this experiment / CLEANUP
- * A dummy initFunc() for tcpclt, because we handle connection establishment ourselves
+/* This callback function is called immediately before a send retry is attempted.
+ * It shall clean up whatever makes sense.
+ * side-note: TCPSendInit() is called afterwards by the generic tcp client code.
  */
-static rsRetVal
-TCPSendInitDummy(void *pvData __attribute__((unused)))
+static rsRetVal TCPSendPrepRetry(void *pvData)
 {
+	DestructTCPTargetData((targetData_t *) pvData);
+	/* Even if the destruct fails, it does not help to provide this info to
+	 * the upper layer. Also, DestructTCPTargtData() does currently not
+	 * provide a return status.
+	 */
 	return RS_RET_OK;
 }
+
+
 
 /* change to network namespace pData->networkNamespace and keep the file
  * descriptor to the original namespace.
@@ -1098,7 +1086,6 @@ poolTryResume(wrkrInstanceData_t *const pWrkrData)
 	DEFiRet;
 	int oneTargetOK = 0;
 	for(int j = 0 ; j <  pWrkrData->pData->nTargets ; ++j) {
-DBGPRINTF("RGER: poolTryResume iterating, j %d\n", j);
 		if(pWrkrData->target[j].bIsConnected) {
 			oneTargetOK = 1;
 		} else {
@@ -1298,9 +1285,7 @@ processMsg(targetData_t *__restrict__ const pTarget,
 		CHKiRet(UDPSend(pWrkrData, psz, l)); // TODO-RG: always add "actualTarget"!
 	} else {
 		/* forward via TCP */
-dbgprintf("RGER: processMSG calling send()\n");
 		iRet = tcpclt.Send(pTarget->pTCPClt, pTarget, (char *)psz, l);
-dbgprintf("RGER: processMSG called  send(), iRet %d\n", iRet);
 		if(iRet != RS_RET_OK && iRet != RS_RET_DEFER_COMMIT && iRet != RS_RET_PREVIOUS_COMMITTED) {
 			/* error! */
 			LogError(0, iRet, "omfwd: error forwarding via tcp to %s:%s, suspending action",
@@ -1364,7 +1349,7 @@ CODESTARTcommitTransaction
 				DBGPRINTF("RGER: sending to actualTarget %d: try %d\n", actualTarget,
 					  trynbr);
 				iRet = processMsg(pTarget, &actParam(pParams, 1, i, 0));
-				if(!(iRet != RS_RET_OK && iRet != RS_RET_DEFER_COMMIT && iRet != RS_RET_PREVIOUS_COMMITTED)) {
+				if(iRet == RS_RET_OK || iRet == RS_RET_DEFER_COMMIT || iRet == RS_RET_PREVIOUS_COMMITTED) {
 					dotry = 0;
 				}
 			}
@@ -1372,8 +1357,8 @@ CODESTARTcommitTransaction
 		}
 
 		if(dotry == 1) {
-			// TODO: preserve error state if we had one?
-			DBGPRINTF("omfwd: no working targets available\n");
+			LogMsg(0, RS_RET_SUSPENDED, LOG_WARNING,
+				"omfwd: no working target servers in pool available, suspending action");
 			ABORT_FINALIZE(RS_RET_SUSPENDED);
 		}
 		pWrkrData->nXmit++;
@@ -1393,10 +1378,9 @@ CODESTARTcommitTransaction
 			pWrkrData->nXmit, pWrkrData->pData->iRebindInterval);
 		pWrkrData->nXmit = 0;	/* else we have an addtl wrap at 2^31-1 */
 		DestructTCPInstanceData(pWrkrData);
-		dbgprintf("RGERx: destruct done\n");
 		initTCP(pWrkrData);
-		dbgprintf("RGERx: init done\n");
-		dbgprintf("DONE REBIND - omfwd dropping target connection (as configured)\n");
+		LogMsg(0, RS_RET_PARAM_ERROR, LOG_WARNING,
+			"omfwd: dropped connections due to configured rebind interval");
 	}
 
 	/* END - REBIND */
@@ -1437,7 +1421,7 @@ initTCP(wrkrInstanceData_t *pWrkrData)
 			CHKiRet(tcpclt.Construct(&pWrkrData->target[i].pTCPClt));
 			CHKiRet(tcpclt.SetResendLastOnRecon(pWrkrData->target[i].pTCPClt, pData->bResendLastOnRecon));
 			/* and set callbacks */
-			CHKiRet(tcpclt.SetSendInit(pWrkrData->target[i].pTCPClt, TCPSendInitDummy));
+			CHKiRet(tcpclt.SetSendInit(pWrkrData->target[i].pTCPClt, TCPSendInit));
 			CHKiRet(tcpclt.SetSendFrame(pWrkrData->target[i].pTCPClt, TCPSendFrame));
 			CHKiRet(tcpclt.SetSendPrepRetry(pWrkrData->target[i].pTCPClt, TCPSendPrepRetry));
 			CHKiRet(tcpclt.SetFraming(pWrkrData->target[i].pTCPClt, pData->tcp_framing));

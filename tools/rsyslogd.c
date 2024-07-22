@@ -995,6 +995,15 @@ logmsgInternalSubmit(const int iErr, const syslog_pri_t pri, const size_t lenMsg
 	smsg_t *pMsg;
 	DEFiRet;
 
+	if(glblAbortOnProgramError && iErr == RS_RET_PROGRAM_ERROR) {
+		fprintf(stderr, "\n\n\n========================================\n"
+			"rsyslog reports program error: %s\n"
+			"rsyslog is configured to abort in this case, "
+			"this will be done now\n", msg);
+		fflush(stdout);
+		abort();
+	}
+
 	CHKiRet(msgConstruct(&pMsg));
 	MsgSetInputName(pMsg, pInternalInputName);
 	MsgSetRawMsg(pMsg, (char*)msg, lenMsg);
@@ -1012,6 +1021,7 @@ logmsgInternalSubmit(const int iErr, const syslog_pri_t pri, const size_t lenMsg
 		pszTag[32] = '\0'; /* just to make sure... */
 		MsgSetTAG(pMsg, pszTag, len);
 	}
+
 	flags |= INTERNAL_MSG;
 	pMsg->msgFlags  = flags;
 	msgSetPRI(pMsg, pri);

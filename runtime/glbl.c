@@ -7,7 +7,7 @@
  *
  * Module begun 2008-04-16 by Rainer Gerhards
  *
- * Copyright 2008-2023 Rainer Gerhards and Adiscon GmbH.
+ * Copyright 2008-2024 Rainer Gerhards and Adiscon GmbH.
  *
  * This file is part of the rsyslog runtime library.
  *
@@ -89,6 +89,7 @@ static uchar *LocalDomain = NULL;/* our local domain name  - read-only after sta
 static int iMaxLine = 8096;
 int bTerminateInputs = 0;		/* global switch that inputs shall terminate ASAP (1=> terminate) */
 int glblUnloadModules = 1;
+int glblAbortOnProgramError = 0;
 char** glblDbgFiles = NULL;
 size_t glblDbgFilesNum = 0;
 int glblDbgWhitelist = 1;
@@ -113,6 +114,7 @@ static struct cnfparamdescr cnfparamdescr[] = {
 	{ "debug.onshutdown", eCmdHdlrBinary, 0 },
 	{ "debug.logfile", eCmdHdlrString, 0 },
 	{ "debug.gnutls", eCmdHdlrNonNegInt, 0 },
+	{ "debug.abortonprogramerror", eCmdHdlrBinary, 0 },
 	{ "debug.unloadmodules", eCmdHdlrBinary, 0 },
 	{ "defaultnetstreamdrivercafile", eCmdHdlrString, 0 },
 	{ "defaultnetstreamdrivercrlfile", eCmdHdlrString, 0 },
@@ -1302,6 +1304,8 @@ glblDoneLoadCnf(void)
 			LogError(0, RS_RET_OK, "debug: onShutdown set to %d", loadConf->globals.debugOnShutdown);
 		} else if(!strcmp(paramblk.descr[i].name, "debug.gnutls")) {
 			loadConf->globals.iGnuTLSLoglevel = (int) cnfparamvals[i].val.d.n;
+		} else if(!strcmp(paramblk.descr[i].name, "debug.abortonprogramerror")) {
+			glblAbortOnProgramError = (int) cnfparamvals[i].val.d.n;
 		} else if(!strcmp(paramblk.descr[i].name, "debug.unloadmodules")) {
 			glblUnloadModules = (int) cnfparamvals[i].val.d.n;
 		} else if(!strcmp(paramblk.descr[i].name, "parser.controlcharacterescapeprefix")) {
