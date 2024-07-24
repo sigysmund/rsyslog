@@ -757,7 +757,6 @@ CheckConnection(targetData_t *const pTarget)
 {
 	DEFiRet;
 
-//fprintf(stderr, "in CheckConnection OMFWD\n");
 	if((pTarget->pData->protocol == FORW_TCP) && (pTarget->pData->bExtendedConnCheck)) {
 		CHKiRet(netstrm.CheckConnection(pTarget->pNetstrm));
 	}
@@ -956,7 +955,6 @@ TCPSendInitTarget(targetData_t *const pTarget)
 	// TODO-RG: check error case - we need to make sure that we handle the situation correctly
 	//	    when SOME calls fails - else we may get into big trouble during de-init
 	if(pTarget->pNetstrm == NULL) {
-DBGPRINTF("TCPSendInitTarget %s:%s, conn %d, pNetstrm %p\n", pTarget->target_name, pTarget->port, pTarget->bIsConnected, pTarget->pNetstrm);
 		dbgprintf("TCPSendInitTarget CREATE %s:%s, conn %d\n", pTarget->target_name, pTarget->port, pTarget->bIsConnected);
 		CHKiRet(netstrms.Construct(&pTarget->pNS));
 		/* the stream driver must be set before the object is finalized! */
@@ -1265,10 +1263,11 @@ ENDtryResume
 BEGINbeginTransaction
 CODESTARTbeginTransaction
 	dbgprintf("omfwd: beginTransaction\n");
-	/* TODO: is it valid to remove this? I think so - test
-	fprintf(stderr, "in beginTransaction\n");
+	/* note: we need to try resume so that we are at least at the start
+	 * of the transaction aware of target states. It is not useful to
+	 * start a transaction when we know it will most probably fail.
+	 */
 	iRet = poolTryResume(pWrkrData);
-	*/
 ENDbeginTransaction
 
 
@@ -1528,7 +1527,7 @@ setInstParamDefaults(instanceData *pData)
 	pData->strmCompFlushOnTxEnd = 1;
 	pData->compressionMode = COMPRESS_NEVER;
 	pData->ipfreebind = IPFREEBIND_ENABLED_WITH_LOG;
-	pData->poolResumeInterval = 0;
+	pData->poolResumeInterval = 30;
 	pData->ratelimiter = NULL;
 	pData->ratelimitInterval = 0;
 	pData->ratelimitBurst = 200;
