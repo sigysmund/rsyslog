@@ -707,12 +707,74 @@ finalize_it:
 
 /* CODE FOR SENDING TCP MESSAGES */
 
+/* This is a common function so that we can emit consistent error
+ * messages whenever we have trouble with a connection, e.g. when
+ * sending or checking if it's broken.
+ */
+static void
+emitConnectionErrorMsg(const targetData_t *const pTarget, const rsRetVal iRet)
+{
+	wrkrInstanceData_t *pWrkrData = (wrkrInstanceData_t *) pTarget->pWrkrData;
+
+	if(iRet == RS_RET_IO_ERROR || iRet == RS_RET_PEER_CLOSED_CONN) {
+		static unsigned int conErrCnt = 0;
+		const int skipFactor = pWrkrData->pData->iConErrSkip;
+
+		const char *actualErrMsg;
+		if(iRet == RS_RET_PEER_CLOSED_CONN) {
+			actualErrMsg = "remote server closed connection. ";
+		} else {
+			actualErrMsg = "we had a generic or IO error with the remote server. "
+				"The actual error message should already have been provided. ";
+		}
+		if (skipFactor <= 1)  {
+			/* All the connection errors are printed. */
+			LogError(0, iRet, "omfwd: %s Server is %s:%s. "
+				"This can be caused by the remote server or an interim system like a load "
+				"balancer or firewall. Rsyslog will re-open the connection if configured "
+				"to do so. [wrkr %u]", actualErrMsg, pTarget->target_name,
+				pTarget->port, pTarget->pWrkrData->wrkrID);
+		} else if ((conErrCnt++ % skipFactor) == 0) {
+			/* Every N'th error message is printed where N is a skipFactor. */
+			LogError(0, iRet, "omfwd: %s Server is %s:%s. "
+				"This can be caused by the remote server or an interim system like a load "
+				"balancer or firewall. Rsyslog will re-open the connection if configured "
+				"to do so. Note that the next %d connection error messages will be "
+				"skipped. [wrkr %u]",
+				actualErrMsg, pTarget->target_name, pTarget->port, skipFactor - 1,
+				pTarget->pWrkrData->wrkrID);
+		}
+	} else {
+		LogError(0, iRet, "omfwd: TCPSendBuf error %d, destruct TCP Connection to %s:%s",
+			iRet, pTarget->target_name, pTarget->port);
+	}
+}
+
+
+/* hack to check connections for plain tcp syslog - see ptcp driver for details */
+static rsRetVal
+CheckConnection(targetData_t *const pTarget)
+{
+	DEFiRet;
+
+//fprintf(stderr, "in CheckConnection OMFWD\n");
+	if((pTarget->pData->protocol == FORW_TCP) && (pTarget->pData->bExtendedConnCheck)) {
+		CHKiRet(netstrm.CheckConnection(pTarget->pNetstrm));
+	}
+
+finalize_it:
+	if(iRet != RS_RET_OK) {
+		emitConnectionErrorMsg(pTarget, iRet);
+		DestructTCPTargetData(pTarget);
+		iRet = RS_RET_SUSPENDED;
+	}
+	RETiRet;
+}
 
 
 static rsRetVal
 TCPSendBufUncompressed(targetData_t *const pTarget, uchar *const buf, const unsigned len)
 {
-	wrkrInstanceData_t *pWrkrData = (wrkrInstanceData_t *) pTarget->pWrkrData;
 	DEFiRet;
 	unsigned alreadySent;
 	ssize_t lenSend;
@@ -734,38 +796,7 @@ TCPSendBufUncompressed(targetData_t *const pTarget, uchar *const buf, const unsi
 
 finalize_it:
 	if(iRet != RS_RET_OK) {
-		if(iRet == RS_RET_IO_ERROR || iRet == RS_RET_PEER_CLOSED_CONN) {
-			static unsigned int conErrCnt = 0;
-			const int skipFactor = pWrkrData->pData->iConErrSkip;
-
-			const char *actualErrMsg;
-			if(iRet == RS_RET_PEER_CLOSED_CONN) {
-				actualErrMsg = "remote server closed connection";
-			} else {
-				actualErrMsg = "we had a generic or IO error with the remote server. "
-					"The actual error message should already have been provided. ";
-			}
-			if (skipFactor <= 1)  {
-				/* All the connection errors are printed. */
-				LogError(0, iRet, "omfwd: %s server is %s:%s. "
-					"This can be caused by the remote server or an interim system like a load "
-					"balancer or firewall. Rsyslog will re-open the connection if configured "
-					"to do so. [wrkr %u]", actualErrMsg, pTarget->target_name,
-					pTarget->port, pTarget->pWrkrData->wrkrID);
-			} else if ((conErrCnt++ % skipFactor) == 0) {
-				/* Every N'th error message is printed where N is a skipFactor. */
-				LogError(0, iRet, "omfwd: %s server is %s:%s. "
-					"This can be caused by the remote server or an interim system like a load "
-					"balancer or firewall. Rsyslog will re-open the connection if configured "
-					"to do so. Note that the next %d connection error messages will be "
-					"skipped. [wrkr %u]",
-					actualErrMsg, pTarget->target_name, pTarget->port, skipFactor - 1,
-					pTarget->pWrkrData->wrkrID);
-			}
-		} else {
-			LogError(0, iRet, "omfwd: TCPSendBuf error %d, destruct TCP Connection to %s:%s",
-				iRet, pTarget->target_name, pTarget->port);
-		}
+		emitConnectionErrorMsg(pTarget, iRet);
 		DestructTCPTargetData(pTarget);
 		iRet = RS_RET_SUSPENDED;
 	}
@@ -1103,7 +1134,9 @@ poolTryResume(wrkrInstanceData_t *const pWrkrData)
 	int oneTargetOK = 0;
 	for(int j = 0 ; j <  pWrkrData->pData->nTargets ; ++j) {
 		if(pWrkrData->target[j].bIsConnected) {
-			oneTargetOK = 1;
+			if(CheckConnection(&(pWrkrData->target[j])) == RS_RET_OK) {
+				oneTargetOK = 1;
+			}
 		} else {
 			DBGPRINTF("omfwd: poolTryResume, calling tryResume, target %d\n", j);
 			iRet = doTryResume(&(pWrkrData->target[j]));
@@ -1232,7 +1265,10 @@ ENDtryResume
 BEGINbeginTransaction
 CODESTARTbeginTransaction
 	dbgprintf("omfwd: beginTransaction\n");
+	/* TODO: is it valid to remove this? I think so - test
+	fprintf(stderr, "in beginTransaction\n");
 	iRet = poolTryResume(pWrkrData);
+	*/
 ENDbeginTransaction
 
 
@@ -1321,6 +1357,7 @@ BEGINcommitTransaction
 	unsigned i;
 	char namebuf[264]; /* 256 for FQDN, 5 for port and 3 for transport => 264 */
 CODESTARTcommitTransaction
+	//fprintf(stderr, "#in commitTransaction\n");
 	CHKiRet(poolTryResume(pWrkrData));
 
 	DBGPRINTF(" %s:%s/%s\n", pWrkrData->pData->target_name[0], pWrkrData->pData->ports[0], // TODO-RG name for action?
