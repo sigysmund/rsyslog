@@ -9,7 +9,7 @@ export NUMMESSAGES=2000
 
 # starting minitcpsrvr receivers so that we can obtain their port
 # numbers
-export MINITCPSRV_EXTRA_OPTS="-D900 -B2 -a -S3"
+export MINITCPSRV_EXTRA_OPTS="-D900 -B2 -a -S5"
 start_minitcpsrvr $RSYSLOG_OUT_LOG  1
 
 add_conf '
@@ -23,11 +23,9 @@ module(load="builtin:omfwd" template="outfmt" iobuffer.maxSize="'$OMFWD_IOBUF_SI
 
 if $msg contains "msgnum:" then {
 	action(type="omfwd" target=["127.0.0.1"] port="'$MINITCPSRVR_PORT1'" protocol="tcp"
-		#extendedConnectionCheck="off"
-		pool.resumeInterval="1"
-		action.resumeRetryCount="-1" action.resumeInterval="1")
-	action(type="omfile" file=`echo $RSYSLOG_OUT_LOG` template="outfmt"
-	       action.ExecOnlyWhenPreviousIsSuspended="on")
+		pool.resumeInterval="2"
+		action.reportsuspensioncontinuation="on"
+		action.resumeRetryCount="-1" action.resumeInterval="3")
 }
 '
 echo Note: intentionally not started any local TCP receiver!
