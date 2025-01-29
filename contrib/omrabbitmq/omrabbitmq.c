@@ -143,6 +143,8 @@ typedef struct _instanceData {
 	int verifyHostname;             /* should hostname be verified for TLS? */
 	int heartbeat;                  /* AMQP heartbeat interval in seconds (0 means disabled, which is default) */
 	char *caCert;                   /* CA certificate to be used for TLS connection */
+	char *clientCert;               /* Client certificate to be used for TLS connection */
+	char *clientKey;                /* Client key to be used for TLS connection */
 
 	recover_t recover_policy;
 
@@ -196,7 +198,9 @@ static struct cnfparamdescr actpdescr[] = {
 	{ "verify_peer", eCmdHdlrBinary, 0 },
 	{ "verify_hostname", eCmdHdlrBinary, 0 },
 	{ "ca_cert", eCmdHdlrGetWord, 0 },
-	{ "exchange", eCmdHdlrGetWord, 0 },
+	{ "client_cert", eCmdHdlrGetWord, 0 },
+	{ "client_key", eCmdHdlrGetWord, 0 },
+    { "exchange", eCmdHdlrGetWord, 0 },
 	{ "routing_key", eCmdHdlrGetWord, 0 },
 	{ "routing_key_template", eCmdHdlrGetWord, 0 },
 	{ "delivery_mode", eCmdHdlrGetWord, 0 },
@@ -390,6 +394,10 @@ static amqp_connection_state_t tryConnection(wrkrInstanceData_t *self, server_t 
 			if (self->pData->caCert) {
 				amqp_ssl_socket_set_cacert(sockfd, self->pData->caCert);
 			}
+
+            if (self->pData->clientCert && self->pData->clientKey) {
+                amqp_ssl_socket_set_key(sockfd, self->pData->clientCert, self->pData->clientKey);
+            }
 		}
 
 		LogError(0, RS_RET_RABBITMQ_CHANNEL_ERR,
@@ -976,6 +984,8 @@ CODESTARTcreateInstance
 	pData->verifyPeer = 0;
 	pData->verifyHostname = 0;
 	pData->caCert = NULL;
+	pData->clientCert = NULL;
+	pData->clientKey = NULL;
 	pData->heartbeat = 0;
 ENDcreateInstance
 
@@ -997,6 +1007,8 @@ CODESTARTfreeInstance
 	if (pData->exchange_type) free(pData->exchange_type);
 	if (pData->server1.host) free(pData->server1.host);
 	if (pData->caCert) free(pData->caCert);
+	if (pData->clientCert) free(pData->clientCert);
+	if (pData->clientKey) free(pData->clientKey);
 ENDfreeInstance
 
 BEGINisCompatibleWithFeature
@@ -1039,6 +1051,8 @@ CODESTARTdbgPrintInstInfo
 	dbgprintf("\tverify_peer=%d\n", pData->verifyPeer);
 	dbgprintf("\tverify_hostname=%d\n", pData->verifyHostname);
 	dbgprintf("\tca_cert='%s'\n", pData->caCert);
+	dbgprintf("\tclient_cert='%s'\n", pData->clientCert);
+	dbgprintf("\tclient_key='%s'\n", pData->clientKey);
 	dbgprintf("\theartbeat_interval=%d\n", pData->heartbeat);
 
 	dbgprintf("\texchange='%*s'\n", (int)pData->exchange.len,
@@ -1095,6 +1109,10 @@ CODESTARTnewActInst
 			pData->ssl = (int) pvals[i].val.d.n;
 		} else if (!strcmp(actpblk.descr[i].name, "ca_cert")) {
 			pData->caCert = (char*)es_str2cstr(pvals[i].val.d.estr, NULL);
+		} else if (!strcmp(actpblk.descr[i].name, "client_cert")) {
+			pData->clientCert = (char*)es_str2cstr(pvals[i].val.d.estr, NULL);
+		} else if (!strcmp(actpblk.descr[i].name, "client_key")) {
+			pData->clientKey = (char*)es_str2cstr(pvals[i].val.d.estr, NULL);
 		} else if (!strcmp(actpblk.descr[i].name, "heartbeat_interval")) {
 			pData->heartbeat = (int) pvals[i].val.d.n;
 		} else if (!strcmp(actpblk.descr[i].name, "init_openssl")) {
